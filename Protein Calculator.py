@@ -6,32 +6,42 @@ import math
 import json
 import os
 import numpy as np
+from collections import Counter
 
 
 def breaking_sequence(resultados, comprimento):
     resultados['Tamanhos'][comprimento] += 1
     resultados['Proteinas Interrompidas'] += 1
 
-def simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities, num=False, tam=False):
+def simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, tipos_aminos, pesos_tipos, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities, num=False, tam=False):
     if num and tam:
         count_completas = 0
         count_prot = 0
         resultados['Tamanhos'] = {i: 0 for i in range(0, tam + 1)}
+
     for _ in range(num_proteinas if not num else num):
         comprimento = 0
         possui_nao_proteinogenico = False
         todos_aminoacidos_L = True  # Verifica se todos os aminoácidos são L
+        sequencia_hidropatica = True
         sequencia_boa = []
         sequencia_ruim = []
 
         while comprimento < (tamanho_maximo if not tam else tam):
+            # Verificar sequencia hidropática
+            hidrop = random.choices(tipos_aminos, weights=pesos_tipos, k=1)[0] if not hidropatica else None
+
             # Sortear um único aminoácido ou amina do pool
             sorteio = random.choices(pool, weights=pesos_pool, k=1)[0]
+
             if sorteio not in aminoacidos_prot:
                 possui_nao_proteinogenico = True
 
             reac_lateral = False
             if sorteio in aminoacidos_prot or sorteio in aminoacidos_nao_prot:
+                if (sorteio not in aminoacidos_prot or amino_prot_proportion[sorteio[-3:]][2] != hidrop) and comprimento > 1 and not hidropatica:
+                    sequencia_hidropatica = False
+
                 if todos_aminoacidos_L and racemico:
                     if sorteio.startswith('D') if sorteio in aminoacidos_prot else random.random() > 0.5:
                         todos_aminoacidos_L = False
@@ -79,12 +89,15 @@ def simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos
                 else:
                     resultados['Com AA não Proteinogenicos'] += 1
                     resultados['sequencias_ruins'].append(sequencia_ruim)
+                if sequencia_hidropatica:
+                    resultados['Sequências Hidropáticas'] += 1
                 if todos_aminoacidos_L:
                     resultados['Proteinas Homoquirais'] += 1  # Contando proteínas completas formadas por aminoácidos L
                 if todos_aminoacidos_L and not possui_nao_proteinogenico:
                     resultados['Apenas Proteinogenicos Homoquirais'] += 1
-                    if random.uniform(0, 1) < probabilities['Prob Sequência Útil']:
-                        resultados['Sequência Útil'] += 1
+                if todos_aminoacidos_L and not possui_nao_proteinogenico and sequencia_hidropatica:
+                    resultados['Sequências Hidropáticas, Homoquirais e Proteinogênicas'] += 1
+
     if num and tam:
         return [count_completas / num, count_prot / num]
     return resultados
@@ -97,11 +110,12 @@ def simular_proteinas(percentuais, num_proteinas,
         'Tamanhos': {i: 0 for i in range(0, tamanho_maximo + 1)},
         'Proteinas Interrompidas': 0,
         'Proteinas Completas': 0,
+        'Sequências Hidropáticas': 0,
         'Com AA não Proteinogenicos': 0,
         'Apenas Proteinogenicos': 0,
         'Proteinas Homoquirais': 0,
         'Apenas Proteinogenicos Homoquirais': 0,
-        'Sequência Útil': 0,
+        'Sequências Hidropáticas, Homoquirais e Proteinogênicas': 0,
         'sequencias': [],
         'sequencias_ruins': []
     }
@@ -137,7 +151,40 @@ def simular_proteinas(percentuais, num_proteinas,
     pool = list(aminoacidos_prot) + list(aminoacidos_nao_prot) + list(amines)
     pesos_pool = list(pesos_prot) + list(pesos_nao_prot) + list(pesos_amines)
 
-    resultados = simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities)
+    tipos_aminos = False
+    pesos_tipos = False
+    if not hidropatica:
+        # Contar a frequência de cada item
+        frequencia = Counter(values[2] for values in amino_prot_proportion.values())
+        tipo_total = sum(frequencia.values())
+
+        # Probabilidade de cada tipo de aminoácido
+        tipo_probs = {tipo: freq / tipo_total for tipo, freq in frequencia.items()}
+
+        # Separar os elementos e pesos para a seleção ponderada
+        tipos_aminos = list(tipo_probs.keys())
+        pesos_tipos = list(tipo_probs.values())
+
+        pool_real = {
+            'Apolar': 0,
+            'Polar': 0,
+            'Acid': 0,
+            'Alcaline': 0
+        }
+
+        for i, aminoacido in enumerate(pool):
+            if aminoacido[-3:] in amino_prot_proportion:
+                tipo = amino_prot_proportion[aminoacido[-3:]][2]
+                pool_real[tipo] += pesos_pool[i] / sum(pesos_pool)
+        probabilities['Prob Sequências Hidropáticas'] = 0
+        for key in pool_real:
+            probabilities['Prob Sequências Hidropáticas'] += tipo_probs[key] * pool_real[key]
+        probabilities['Prob Sequências Hidropáticas'] = probabilities['Prob Sequências Hidropáticas'] ** tamanho_maximo
+        probabilities['Sequências Hidropáticas'] = probabilities['Prob Sequências Hidropáticas'] * num_proteinas
+    else:
+        probabilities['Prob Sequências Hidropáticas'] = 1
+
+    resultados = simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, tipos_aminos, pesos_tipos, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities)
 
     # Cálculo de porcentagens
 
@@ -192,20 +239,17 @@ def simular_proteinas(percentuais, num_proteinas,
     # Calcular Projeções
     rota = "P("
     for amino_acido, entry in entries_prot.items():
-        peso = entry.get().strip().replace('.', '').replace('0e-0', '-').replace('e+0', '').replace('e-0', '-')
-        peso = peso[:-1] if peso[-1] == '0' else peso
+        peso = "{:.1e}".format(float(entry.get().strip())).replace('.0e+00', '').replace('e+00', '').replace('.0e-0', '-').replace('e-0', '-')
         rota += peso + '/'
-    rota += ")N("
+    rota = rota[:-1] + ")N("
     for amino_acido, entry in entries_nao_prot.items():
-        peso = entry.get().strip().replace('.', '').replace('0e-0', '-').replace('e+0', '').replace('e-0', '-')
-        peso = peso[:-1] if peso[-1] == '0' else peso
+        peso = "{:.1e}".format(float(entry.get().strip())).replace('.0e+00', '').replace('e+00', '').replace('.0e-0', '-').replace('e-0', '-')
         rota += peso + '/'
-    rota += ")A("
+    rota = rota[:-1] + ")A("
     for amine, entry in entries_amines.items():
-        peso = entry.get().strip().replace('.', '').replace('0e-0', '-').replace('e+0','').replace('e-0', '-')
-        peso = peso[:-1] if peso[-1] == '0' else peso
+        peso = "{:.1e}".format(float(entry.get().strip())).replace('.0e+00', '').replace('e+00', '').replace('.0e-0', '-').replace('e-0', '-')
         rota += peso + '/'
-    rota += ")"
+    rota = rota[:-1] + ")"
 
     caminho = f"{rota}{racemico}{laterais}"
 
@@ -234,10 +278,10 @@ def simular_proteinas(percentuais, num_proteinas,
 
             lengs, interrupt = resultados['Tamanhos'], resultados['Proteinas Interrompidas']
             for _ in range(100):
-                sim_results = simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities, 10000, 10)
+                sim_results = simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, tipos_aminos, pesos_tipos, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities, 10000, 10)
                 prob_formar[caminho][10]['formacao'].append(sim_results[0])
                 prob_formar[caminho][10]['apenas_prot'].append(sim_results[1])
-                sim_results = simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities, 10000, 11)
+                sim_results = simular_polimerizacao(resultados, num_proteinas, tamanho_maximo, pool, pesos_pool, tipos_aminos, pesos_tipos, aminoacidos_prot, aminoacidos_nao_prot, amines, probabilities, 10000, 11)
                 prob_formar[caminho][11]['formacao'].append(sim_results[0])
                 prob_formar[caminho][11]['apenas_prot'].append(sim_results[1])
                 print(f'calibração inicial: {_}% concluída')
@@ -313,22 +357,21 @@ def simular_proteinas(percentuais, num_proteinas,
 
     probabilities['Prob de Formar'] = mean if mean else formou
     probabilities['Proteinas Completas'] = probabilities['Prob de Formar'] * num_proteinas
+    probabilities['Sequências Hidropáticas'] = probabilities['Proteinas Completas'] if hidropatica else probabilities['Sequências Hidropáticas']
     probabilities['Prob Apenas Proteinogenicos'] = mean_prot if mean_prot else ((1 - (percentuais['percentual_aminas'])) ** tamanho_maximo) * (
             percentuais['percentual_proteinogenicos'] ** tamanho_maximo)
-    probabilities['Apenas Proteinogenicos'] = probabilities['Prob Apenas Proteinogenicos']* num_proteinas
-    probabilities['% Apenas Proteinogenicos'] = (percentuais['percentual_proteinogenicos'] ** tamanho_maximo) * 100
-    probabilities['Proteinas Homoquirais'] = (resultados['Proteinas Completas']) * (
-            total_homoquiral_chance ** tamanho_maximo) if racemico else resultados['Proteinas Completas']
-    probabilities['Prob Proteinas Homoquirais'] = ((1 - (percentuais['percentual_aminas'])) ** tamanho_maximo) * (
-            total_homoquiral_chance ** tamanho_maximo) if racemico else 1
-    probabilities['Apenas Proteinogenicos Homoquirais'] = (resultados['Proteinas Completas']) * (
-            total_homoquiral_chance ** tamanho_maximo) * (percentuais['percentual_proteinogenicos'] ** tamanho_maximo) if racemico else probabilities['Apenas Proteinogenicos']
-    probabilities['Prob Apenas Proteinogenicos Homoquirais'] = ((1 - (percentuais['percentual_aminas'])) ** tamanho_maximo) * (
-            total_homoquiral_chance ** tamanho_maximo) * (percentuais['percentual_proteinogenicos'] ** tamanho_maximo) if racemico else probabilities['Prob Apenas Proteinogenicos']
-    probabilities['% Apenas Proteinogenicos Homoquirais'] = 100 * (
-            total_homoquiral_chance ** tamanho_maximo) * (percentuais['percentual_proteinogenicos'] ** tamanho_maximo) if racemico else probabilities['% Apenas Proteinogenicos']
-    probabilities['Prob Sequência Útil'] = (3.18 ** -tamanho_maximo) * (dif ** tamanho_maximo) * ((
-            total_homoquiral_chance ** tamanho_maximo) if racemico else 1) * (dif_prot ** tamanho_maximo) if todos_presentes else 0
+    probabilities['Apenas Proteinogenicos'] = probabilities['Prob Apenas Proteinogenicos'] * num_proteinas
+    probabilities['% Apenas Proteinogenicos'] = (probabilities['Apenas Proteinogenicos'] / probabilities['Proteinas Completas']) * 100
+    print(percentuais['glycine'])
+    probabilities['Prob Proteinas Homoquirais'] = probabilities['Prob de Formar'] * (1 + percentuais['glycine']) * (total_homoquiral_chance ** tamanho_maximo) if racemico else 1
+    probabilities['Proteinas Homoquirais'] = probabilities['Prob Proteinas Homoquirais'] * num_proteinas * (1 + percentuais['glycine'])
+    probabilities['Prob Apenas Proteinogenicos Homoquirais'] = ((total_homoquiral_chance ** tamanho_maximo) * (1 + percentuais['glycine']) if racemico else 1) * probabilities['Prob Apenas Proteinogenicos']
+    probabilities['Apenas Proteinogenicos Homoquirais'] = probabilities['Prob Apenas Proteinogenicos Homoquirais'] * num_proteinas
+    probabilities['% Apenas Proteinogenicos Homoquirais'] = probabilities['% Apenas Proteinogenicos'] *  ((total_homoquiral_chance ** tamanho_maximo) if racemico else 1)
+    probabilities['Prob Sequências Hidropáticas, Homoquirais e Proteinogênicas'] = (mean_prot if mean_prot else ((1 - (percentuais['percentual_aminas'])) ** tamanho_maximo) * (
+            percentuais['percentual_proteinogenicos'] ** tamanho_maximo)) * probabilities['Prob Sequências Hidropáticas'] * (((total_homoquiral_chance ** tamanho_maximo) * (1 + percentuais['glycine'])) if racemico else 1)
+    probabilities['Sequências Hidropáticas, Homoquirais e Proteinogênicas'] = probabilities['Prob Sequências Hidropáticas, Homoquirais e Proteinogênicas'] * num_proteinas
+    probabilities['Prob Sequência Útil'] = (3.18 ** -tamanho_maximo) * probabilities['Prob Sequências Hidropáticas, Homoquirais e Proteinogênicas'] if todos_presentes else 0
     probabilities['Sequência Útil'] = probabilities['Prob Sequência Útil'] * num_proteinas
 
     for key in probabilities.keys():
@@ -342,235 +385,253 @@ def calcular_proporcoes():
     global percentuais, base_amino_prot_proportion, new_amino_prot_proportion
     # Obtem valores dos campos de entrada e ajusta os dicionários
 
-    try:
-        new_amino_prot_proportion = {}
-        new_amino_nao_prot_proportion = {}
-        new_amines_proportion = {}
-        base_amino_prot_proportion = {}
+    #try:
+    new_amino_prot_proportion = {}
+    new_amino_nao_prot_proportion = {}
+    new_amines_proportion = {}
+    base_amino_prot_proportion = {}
 
-        # Populando new_amino_prot_proportion com as quantidades de isômeros
-        if racemico:
-            for amino_acido, entry in entries_prot.items():
-                value = float(entry.get().strip())  # Assume que o segundo elemento é o valor
-                if value:
-                    if amino_acido == 'GLY':
-                        new_amino_prot_proportion[amino_acido] = value  # Deixa como está
+    # Populando new_amino_prot_proportion com as quantidades de isômeros
+    if racemico:
+        for amino_acido, entry in entries_prot.items():
+            value = float(entry.get().strip())  # Assume que o segundo elemento é o valor
+            if value and float(value) > 0:
+                if amino_acido == 'GLY':
+                    new_amino_prot_proportion[amino_acido] = value  # Deixa como está
+                    base_amino_prot_proportion[amino_acido] = value
+                else:
+                    # Calcula as proporções para L e D
+                    if amino_acido == 'ILE' or amino_acido == 'THR':  # Para ILE ou THR
+                        new_amino_prot_proportion[f'L-{amino_acido}'] = value / 4
+                        new_amino_prot_proportion[f'D-{amino_acido}'] = (value * 3) / 4
                         base_amino_prot_proportion[amino_acido] = value
+                    else:  # Para outros aminoácidos com 2 isômeros
+                        new_amino_prot_proportion[f'L-{amino_acido}'] = value / 2
+                        new_amino_prot_proportion[f'D-{amino_acido}'] = value / 2
+                        base_amino_prot_proportion[amino_acido] = value
+    else:
+        for amino_acido, entry in entries_prot.items():
+            value = entry.get().strip()  # Remove espaços em branco
+            if value and float(value) > 0:
+                new_amino_prot_proportion[amino_acido] = float(value)  # Se estiver vazio, considera 0
+        base_amino_prot_proportion = new_amino_prot_proportion
+    # Coleta os valores dos aminoácidos não proteogênicos
+    for amino_acido, entry in entries_nao_prot.items():
+        value = entry.get().strip()  # Remove espaços em branco
+        new_amino_nao_prot_proportion[amino_acido] = float(value) if value else 0.0  # Se estiver vazio, considera 0
+
+    # Coleta os valores das aminas
+    for amino_acido, entry in entries_amines.items():
+        value = entry.get().strip()  # Remove espaços em branco
+        new_amines_proportion[amino_acido] = float(value) if value else 0.0  # Se estiver vazio, considera 0
+
+    num_proteinas = int(entry_num_proteinas.get())
+    tamanho_maximo = int(entry_tamanho_maximo.get())
+
+    # Calculando totais
+    total_prot = sum(new_amino_prot_proportion.values())
+    total_nao_prot = sum(new_amino_nao_prot_proportion.values())
+    total_amines = sum(new_amines_proportion.values())
+
+    # Total combinado
+    total_geral = total_prot + total_nao_prot + total_amines
+    total_aminos = total_prot + total_nao_prot
+
+    # Criando um dicionário para os percentuais de cada tipo de ligação
+    percentuais = {}
+
+    percentuais['percentual_proteinogenicos'] = total_prot / total_geral
+    percentuais['percentual_nao_proteinogenicos'] = total_nao_prot / total_geral
+    percentuais['percentual_aminas'] = total_amines / total_geral
+    percentuais['glycine'] = new_amino_prot_proportion['GLY'] / total_aminos
+    percentuais['amida_prot'] = sum(new_amino_prot_proportion[amino] for amino in lig_laterais['Amida'][:9] if amino in new_amino_prot_proportion) / total_aminos
+    percentuais['amida_nao_prot'] = sum(new_amino_nao_prot_proportion[amino] for amino in lig_laterais['Amida'][9:] if amino in new_amino_nao_prot_proportion) / total_aminos
+    percentuais['react_prot'] = 0
+    percentuais['react_nao_prot'] = 0
+    for tipo in lig_laterais:
+        if tipo == 'Hidroxila':
+            percentuais['react_prot'] += sum(new_amino_prot_proportion[amino] for amino in lig_laterais[tipo][:9] if amino in new_amino_prot_proportion) / total_aminos
+            percentuais['react_nao_prot'] += sum(new_amino_nao_prot_proportion[amino] for amino in lig_laterais[tipo][9:] if amino in new_amino_nao_prot_proportion) / total_aminos
+        elif tipo == 'Fenol':
+            percentuais['react_prot'] += sum(new_amino_prot_proportion[amino] for amino in lig_laterais[tipo] if amino in new_amino_prot_proportion) / total_aminos
+        elif tipo == 'Tiol':
+            percentuais['react_prot'] += sum(new_amino_prot_proportion[amino] for amino in lig_laterais[tipo][:6] if amino in new_amino_prot_proportion) / total_aminos
+            percentuais['react_nao_prot'] += sum(new_amino_nao_prot_proportion[amino] for amino in lig_laterais[tipo][6:] if amino in new_amino_nao_prot_proportion) / total_aminos
+    for prob in percentuais:
+        print(f"{prob}: {percentuais[prob]}")
+
+    for tipo_ligacao, amino_acidos in lig_laterais.items():
+        percentual_total = 0
+
+        for amino_acido in amino_acidos:
+            # Verifica se o aminoácido está nos dicionários e calcula a proporção
+            if amino_acido in new_amino_prot_proportion:
+                percentual_total += new_amino_prot_proportion[amino_acido] / total_geral
+            elif amino_acido in new_amino_nao_prot_proportion:
+                percentual_total += new_amino_nao_prot_proportion[amino_acido] / total_geral
+            elif amino_acido in new_amines_proportion:
+                percentual_total += new_amines_proportion[amino_acido] / total_geral
+
+                # Armazenando o percentual total para cada tipo de ligação
+        percentuais[f'percentual_{tipo_ligacao}'] = percentual_total
+    # Percentuais de aminoácidos que têm ligações laterais
+    percentuais_com_ligacao = sum([percentuais[f'percentual_{tipo}'] for tipo in lig_laterais])
+
+    # Calculando percentual sem ligações
+    percentuais[f'percentual_sem_lig'] = (percentuais['percentual_proteinogenicos'] + percentuais['percentual_nao_proteinogenicos'] + percentuais['percentual_aminas'] - percentuais_com_ligacao)
+
+    aminoacidos_prot, pesos_prot = zip(
+        *[(amino_acido, peso) for amino_acido, peso in new_amino_prot_proportion.items() if peso != 0])
+
+    if total_nao_prot != 0:
+        aminoacidos_nao_prot, pesos_nao_prot = zip(
+            *[(amino_acido, peso) for amino_acido, peso in new_amino_nao_prot_proportion.items() if peso != 0])
+    else:
+        aminoacidos_nao_prot, pesos_nao_prot = [], []
+
+    if total_amines != 0:
+        amines, pesos_amines = zip(
+            *[(amine, peso) for amine, peso in new_amines_proportion.items() if peso != 0])
+    else:
+        amines, pesos_amines = [], []
+
+    # Inicializando variáveis
+    total_weight = 0
+    total_homoquiral_weight = 0
+
+    # Cálculo da probabilidade de ser homoquiral
+    for isomer, abundance in new_amino_prot_proportion.items():
+        total_weight += abundance  # Soma total de abundâncias
+        if isomer.startswith('L-') or isomer == 'GLY':
+            total_homoquiral_weight += abundance  # Soma apenas as abundâncias L
+
+    # A porcentagem de homoquiralidade é a proporção de isômeros L no total
+    if total_weight > 0:
+        percentual_prot_homoquiral = (total_homoquiral_weight / total_weight) * 100
+    else:
+        percentual_prot_homoquiral = 0
+
+    total_homoquiral_chance = ((percentual_prot_homoquiral * percentuais['percentual_proteinogenicos']) + (
+                50 * percentuais['percentual_nao_proteinogenicos'])) / (
+                                          percentuais['percentual_proteinogenicos'] + percentuais['percentual_nao_proteinogenicos']) / 100 if racemico else 1
+
+    # Encontrar o maior valor em ambos os dicionários
+    max_value_prot = max(new_amino_prot_proportion.values())
+    max_value_nao_prot = max(new_amino_nao_prot_proportion.values())
+
+    # Determinar o maior valor entre os dois
+    max_value = max(max_value_prot, max_value_nao_prot)
+
+    # Calcular 10% do maior valor
+    threshold = 0.2 * max_value
+
+    # Criar uma lista com as chaves cujo valores são iguais ou maiores que o limite
+    best_prot = [
+        key for key, value in new_amino_prot_proportion.items() if value >= threshold
+    ]
+    best_nao_prot = [
+        key for key, value in new_amino_nao_prot_proportion.items() if value >= threshold
+    ]
+
+    # Executa a simulação
+    resultados, numero_restante, probabilities = simular_proteinas(percentuais, num_proteinas, tamanho_maximo,
+                                                                   aminoacidos_prot, pesos_prot, aminoacidos_nao_prot,
+                                                                   pesos_nao_prot, amines, pesos_amines, best_prot,
+                                                                   total_homoquiral_chance)
+
+    # Exibindo resultados na caixa de texto
+    result_box.delete(1.0, tk.END)
+    result_box.insert(tk.END, "RESULTADOS DA SIMULAÇÃO:\n\n", 'title')
+
+    # Mapeamento de formatação
+    formato_aminoacidos = {}
+
+    # Adicionar formatação para aminoácidos proteinogênicos
+    for aminoacido in new_amino_prot_proportion:
+        if aminoacido not in best_prot:
+            if aminoacido.startswith('D'):
+                formato_aminoacidos[aminoacido] = "blue under"
+            else:
+                formato_aminoacidos[aminoacido] = "blue"
+        else:
+            if aminoacido.startswith('D'):
+                formato_aminoacidos[aminoacido] = "under"
+            else:
+                formato_aminoacidos[aminoacido] = "normal"  # ou None
+
+    # Adicionar formatação para aminoácidos não proteinogênicos
+    for aminoacido in new_amino_nao_prot_proportion:
+        formato_aminoacidos[aminoacido] = "red"
+
+    for i, key in enumerate(resultados.keys()):
+        if i == 11:
+            result_box.insert(tk.END, '\n')
+            result_box.insert(tk.END, f"{key} ", "bold")  # Inserir a key em negrito
+            result_box.insert(tk.END, f"{round(resultados[key], 2)}%\n", 'normal')  # Inserir o resultado normal
+        elif key == 'sequencias':
+            pass
+        elif key == 'sequencias_ruins':
+            pass
+        elif key == 'melhor_sequencia':
+            if len(resultados[key]) > 1:
+                result_box.insert(tk.END, '\nMelhores Sequências: ', 'bold')
+                result_box.insert(tk.END, str(numero_restante) + '\n', 'normal')
+            elif len(resultados[key]) == 1:
+                result_box.insert(tk.END, '\nMelhor Sequência: ', 'bold')
+                result_box.insert(tk.END, str(numero_restante) + '\n', 'normal')
+            else:
+                pass
+            for j, sublist in enumerate(resultados[key]):
+                result_box.insert(tk.END, str(j + 1) + '. {', 'normal')
+                for i, amino_acido in enumerate(sublist):
+                    if i > 0:
+                        result_box.insert(tk.END, ", ", 'normal')
+                    tag = formato_aminoacidos.get(amino_acido, None)  # Pega a formatação, se houver
+                    if tag == "blue":
+                        result_box.insert(tk.END, f"{amino_acido}", "blue")
+                    elif tag == 'blue under':
+                        result_box.insert(tk.END, f"{amino_acido}", "blue under")
+                    elif tag == 'under':
+                        result_box.insert(tk.END, f"{amino_acido}", "under")
+                    elif tag == "red":
+                        result_box.insert(tk.END, f"{amino_acido}", "red")
                     else:
-                        # Calcula as proporções para L e D
-                        if amino_acido == 'ILE' or amino_acido == 'THR':  # Para ILE ou THR
-                            new_amino_prot_proportion[f'L-{amino_acido}'] = value / 4
-                            new_amino_prot_proportion[f'D-{amino_acido}'] = (value * 3) / 4
-                            base_amino_prot_proportion[amino_acido] = value
-                        else:  # Para outros aminoácidos com 2 isômeros
-                            new_amino_prot_proportion[f'L-{amino_acido}'] = value / 2
-                            new_amino_prot_proportion[f'D-{amino_acido}'] = value / 2
-                            base_amino_prot_proportion[amino_acido] = value
+                        result_box.insert(tk.END, f"{amino_acido}", 'normal')  # Formato normal
+
+                result_box.insert(tk.END, "}\n\n")  # Nova linha após cada sublista
         else:
-            for amino_acido, entry in entries_prot.items():
-                value = entry.get().strip()  # Remove espaços em branco
-                new_amino_prot_proportion[amino_acido] = float(value) if value else 0.0  # Se estiver vazio, considera 0
-            base_amino_prot_proportion = new_amino_prot_proportion
-        # Coleta os valores dos aminoácidos não proteogênicos
-        for amino_acido, entry in entries_nao_prot.items():
-            value = entry.get().strip()  # Remove espaços em branco
-            new_amino_nao_prot_proportion[amino_acido] = float(value) if value else 0.0  # Se estiver vazio, considera 0
-
-        # Coleta os valores das aminas
-        for amino_acido, entry in entries_amines.items():
-            value = entry.get().strip()  # Remove espaços em branco
-            new_amines_proportion[amino_acido] = float(value) if value else 0.0  # Se estiver vazio, considera 0
-
-        num_proteinas = int(entry_num_proteinas.get())
-        tamanho_maximo = int(entry_tamanho_maximo.get())
-
-        # Calculando totais
-        total_prot = sum(new_amino_prot_proportion.values())
-        total_nao_prot = sum(new_amino_nao_prot_proportion.values())
-        total_amines = sum(new_amines_proportion.values())
-
-        # Total combinado
-        total_geral = total_prot + total_nao_prot + total_amines
-
-        # Criando um dicionário para os percentuais de cada tipo de ligação
-        percentuais = {}
-
-        percentuais['percentual_proteinogenicos'] = total_prot / total_geral
-        percentuais['percentual_nao_proteinogenicos'] = total_nao_prot / total_geral
-        percentuais['percentual_aminas'] = total_amines / total_geral
-
-        for tipo_ligacao, amino_acidos in lig_laterais.items():
-            percentual_total = 0
-
-            for amino_acido in amino_acidos:
-                # Verifica se o aminoácido está nos dicionários e calcula a proporção
-                if amino_acido in new_amino_prot_proportion:
-                    percentual_total += new_amino_prot_proportion[amino_acido] / total_geral
-                elif amino_acido in new_amino_nao_prot_proportion:
-                    percentual_total += new_amino_nao_prot_proportion[amino_acido] / total_geral
-                elif amino_acido in new_amines_proportion:
-                    percentual_total += new_amines_proportion[amino_acido] / total_geral
-
-                    # Armazenando o percentual total para cada tipo de ligação
-            percentuais[f'percentual_{tipo_ligacao}'] = percentual_total
-        # Percentuais de aminoácidos que têm ligações laterais
-        percentuais_com_ligacao = sum([percentuais[f'percentual_{tipo}'] for tipo in lig_laterais])
-
-        # Calculando percentual sem ligações
-        percentuais[f'percentual_sem_lig'] = (percentuais['percentual_proteinogenicos'] + percentuais['percentual_nao_proteinogenicos'] + percentuais['percentual_aminas'] - percentuais_com_ligacao)
-
-        aminoacidos_prot, pesos_prot = zip(
-            *[(amino_acido, peso) for amino_acido, peso in new_amino_prot_proportion.items() if peso != 0])
-
-        if total_nao_prot != 0:
-            aminoacidos_nao_prot, pesos_nao_prot = zip(
-                *[(amino_acido, peso) for amino_acido, peso in new_amino_nao_prot_proportion.items() if peso != 0])
-        else:
-            aminoacidos_nao_prot, pesos_nao_prot = [], []
-
-        if total_amines != 0:
-            amines, pesos_amines = zip(
-                *[(amine, peso) for amine, peso in new_amines_proportion.items() if peso != 0])
-        else:
-            amines, pesos_amines = [], []
-
-        # Inicializando variáveis
-        total_weight = 0
-        total_homoquiral_weight = 0
-
-        # Cálculo da probabilidade de ser homoquiral
-        for isomer, abundance in new_amino_prot_proportion.items():
-            total_weight += abundance  # Soma total de abundâncias
-            if isomer.startswith('L-') or isomer == 'GLY':
-                total_homoquiral_weight += abundance  # Soma apenas as abundâncias L
-
-        # A porcentagem de homoquiralidade é a proporção de isômeros L no total
-        if total_weight > 0:
-            percentual_prot_homoquiral = (total_homoquiral_weight / total_weight) * 100
-        else:
-            percentual_prot_homoquiral = 0
-
-        total_homoquiral_chance = ((percentual_prot_homoquiral * percentuais['percentual_proteinogenicos']) + (
-                    50 * percentuais['percentual_nao_proteinogenicos'])) / (
-                                              percentuais['percentual_proteinogenicos'] + percentuais['percentual_nao_proteinogenicos']) / 100 if racemico else 1
-
-        # Encontrar o maior valor em ambos os dicionários
-        max_value_prot = max(new_amino_prot_proportion.values())
-        max_value_nao_prot = max(new_amino_nao_prot_proportion.values())
-
-        # Determinar o maior valor entre os dois
-        max_value = max(max_value_prot, max_value_nao_prot)
-
-        # Calcular 10% do maior valor
-        threshold = 0.2 * max_value
-
-        # Criar uma lista com as chaves cujo valores são iguais ou maiores que o limite
-        best_prot = [
-            key for key, value in new_amino_prot_proportion.items() if value >= threshold
-        ]
-        best_nao_prot = [
-            key for key, value in new_amino_nao_prot_proportion.items() if value >= threshold
-        ]
-
-        # Executa a simulação
-        resultados, numero_restante, probabilities = simular_proteinas(percentuais, num_proteinas, tamanho_maximo,
-                                                                       aminoacidos_prot, pesos_prot, aminoacidos_nao_prot,
-                                                                       pesos_nao_prot, amines, pesos_amines, best_prot,
-                                                                       total_homoquiral_chance)
-
-        # Exibindo resultados na caixa de texto
-        result_box.delete(1.0, tk.END)
-        result_box.insert(tk.END, "RESULTADOS DA SIMULAÇÃO:\n\n", 'title')
-
-        # Mapeamento de formatação
-        formato_aminoacidos = {}
-
-        # Adicionar formatação para aminoácidos proteinogênicos
-        for aminoacido in new_amino_prot_proportion:
-            if aminoacido not in best_prot:
-                if aminoacido.startswith('D'):
-                    formato_aminoacidos[aminoacido] = "blue under"
-                else:
-                    formato_aminoacidos[aminoacido] = "blue"
+            result_box.insert(tk.END, f"{key} ", "bold")  # Inserir a key em negrito
+            if key in list(probabilities.keys()):
+                result_box.insert(tk.END, f"({round(probabilities[key], 4)})", 'red')
+            if isinstance(resultados[key], float):
+                result_box.insert(tk.END, f": {round(resultados[key], 2)}%\n", 'normal')  # Inserir o resultado normal
             else:
-                if aminoacido.startswith('D'):
-                    formato_aminoacidos[aminoacido] = "under"
-                else:
-                    formato_aminoacidos[aminoacido] = "normal"  # ou None
+                result_box.insert(tk.END, f": {resultados[key]}\n", 'normal')  # Inserir o resultado normal
 
-        # Adicionar formatação para aminoácidos não proteinogênicos
-        for aminoacido in new_amino_nao_prot_proportion:
-            formato_aminoacidos[aminoacido] = "red"
+    # Adiciona Estatísticas comparativas:
+    probabilidade = probabilities['Prob Sequência Útil']
 
-        for i, key in enumerate(resultados.keys()):
-            if i == 10:
-                result_box.insert(tk.END, '\n')
-                result_box.insert(tk.END, f"{key} ", "bold")  # Inserir a key em negrito
-                result_box.insert(tk.END, f"{round(resultados[key], 2)}%\n", 'normal')  # Inserir o resultado normal
-            elif key == 'sequencias':
-                pass
-            elif key == 'sequencias_ruins':
-                pass
-            elif key == 'melhor_sequencia':
-                if len(resultados[key]) > 1:
-                    result_box.insert(tk.END, '\nMelhores Sequências: ', 'bold')
-                    result_box.insert(tk.END, str(numero_restante) + '\n', 'normal')
-                elif len(resultados[key]) == 1:
-                    result_box.insert(tk.END, '\nMelhor Sequência: ', 'bold')
-                    result_box.insert(tk.END, str(numero_restante) + '\n', 'normal')
-                else:
-                    pass
-                for j, sublist in enumerate(resultados[key]):
-                    result_box.insert(tk.END, str(j + 1) + '. {', 'normal')
-                    for i, amino_acido in enumerate(sublist):
-                        if i > 0:
-                            result_box.insert(tk.END, ", ", 'normal')
-                        tag = formato_aminoacidos.get(amino_acido, None)  # Pega a formatação, se houver
-                        if tag == "blue":
-                            result_box.insert(tk.END, f"{amino_acido}", "blue")
-                        elif tag == 'blue under':
-                            result_box.insert(tk.END, f"{amino_acido}", "blue under")
-                        elif tag == 'under':
-                            result_box.insert(tk.END, f"{amino_acido}", "under")
-                        elif tag == "red":
-                            result_box.insert(tk.END, f"{amino_acido}", "red")
-                        else:
-                            result_box.insert(tk.END, f"{amino_acido}", 'normal')  # Formato normal
+    if probabilidade == 0:
+        result_box.insert(tk.END, "-------------------------\nÉ impossível formar qualquer proteína útil.\n", 'normal')
+        return
 
-                    result_box.insert(tk.END, "}\n\n")  # Nova linha após cada sublista
-            else:
-                result_box.insert(tk.END, f"{key} ", "bold")  # Inserir a key em negrito
-                if key in list(probabilities.keys()):
-                    result_box.insert(tk.END, f"({round(probabilities[key], 4)})", 'red')
-                if isinstance(resultados[key], float):
-                    result_box.insert(tk.END, f": {round(resultados[key], 2)}%\n", 'normal')  # Inserir o resultado normal
-                else:
-                    result_box.insert(tk.END, f": {resultados[key]}\n", 'normal')  # Inserir o resultado normal
-
-        # Adiciona Estatísticas comparativas:
-        probabilidade = probabilities['Prob Sequência Útil']
-
-        if probabilidade == 0:
-            result_box.insert(tk.END, "-------------------------\nÉ impossível formar qualquer proteína útil.\n", 'normal')
-            return
-
-            # Converte a probabilidade para notação científica
-        ordem_magnitude = math.floor(math.log10(probabilidade))
-        valor_base = probabilidade / (10 ** ordem_magnitude)
+        # Converte a probabilidade para notação científica
+    ordem_magnitude = math.floor(math.log10(probabilidade))
+    valor_base = probabilidade / (10 ** ordem_magnitude)
 
 
-        # Exibe os resultados em notação científica
-        result_box.insert(tk.END, "-------------------------\nProbabilidade de uma Sequência Útil: ", 'bold')
-        result_box.insert(tk.END,f"{valor_base:.2f} x 10", 'normal')
-        result_box.insert(tk.END, f"{int(ordem_magnitude)}\n", 'superscript')
+    # Exibe os resultados em notação científica
+    result_box.insert(tk.END, "-------------------------\nProbabilidade de uma Sequência Útil: ", 'bold')
+    result_box.insert(tk.END,f"{valor_base:.2f} x 10", 'normal')
+    result_box.insert(tk.END, f"{int(ordem_magnitude)}\n", 'superscript')
 
-        #
-        nome_prot = 'proteína' if tamanho_maximo > 49 else ('oligopeptídeo' if tamanho_maximo > 29 else 'oligopeptídeo curto')
+    #
+    nome_prot = 'proteína' if tamanho_maximo > 49 else ('oligopeptídeo' if tamanho_maximo > 29 else 'oligopeptídeo curto')
 
-        insert_weight(result_box, ordem_magnitude, valor_base, nome_prot)
+    insert_weight(result_box, ordem_magnitude, valor_base, nome_prot)
 
-    except ValueError:
-        messagebox.showerror("Erro", "Por favor, insira valores válidos.")
+    #except ValueError:
+    #    messagebox.showerror("Erro", "Por favor, insira valores válidos.")
 
 def insert_weight(result_box, ordem_magnitude, valor_base, nome_prot):
     if ordem_magnitude <= -80:
@@ -765,26 +826,26 @@ nomemclaturas = ['', 'mil ', 'milhões de ', 'bilhões de', 'trilhões de', 'qua
 
 # Dicionário dos aminoácidos proteogênicos com nome e proporção
 amino_prot_proportion = {
-    'GLY': ('Glycine', 1),
-    'ALA': ('Alanine', 1.1),
-    'SER': ('Serine', 0.05),
-    'THR': ('Threonine', 0.02),
-    'VAL': ('Valine', 0.6),
-    'ILE': ('Isoleucine', 0.03),
-    'LEU': ('Leucine', 0.009),
-    'MET': ('Methionine', 0.002),
-    'PHE': ('Phenylalanine', 0),
-    'TYR': ('Tyrosine', 0),
-    'TRP': ('Tryptophan', 0),
-    'ASP': ('Aspartic Acid', 0.008),
-    'GLU': ('Glutamic Acid', 0.02),
-    'ASN': ('Asparagine', 0),
-    'GLN': ('Glutamine', 0),
-    'CYS': ('Cysteine', 0),
-    'LYS': ('Lysine', 0),
-    'ARG': ('Arginine', 0),
-    'HIS': ('Histidine', 0),
-    'PRO': ('Proline', 0)
+    'GLY': ['Glycine', 1, 'Apolar'],
+    'ALA': ['Alanine', 1.1, 'Apolar'],
+    'SER': ['Serine', 0.05, 'Polar'],
+    'THR': ['Threonine', 0.02, 'Polar'],
+    'VAL': ['Valine', 0.6, 'Apolar'],
+    'ILE': ['Isoleucine', 0.03, 'Apolar'],
+    'LEU': ['Leucine', 0.009, 'Apolar'],
+    'MET': ['Methionine', 0.002, 'Apolar'],
+    'PHE': ['Phenylalanine', 0, 'Apolar'],
+    'TYR': ['Tyrosine', 0, 'Polar'],
+    'TRP': ['Tryptophan', 0, 'Apolar'],
+    'ASP': ['Aspartic Acid', 0.008, 'Acid'],
+    'GLU': ['Glutamic Acid', 0.02, 'Acid'],
+    'ASN': ['Asparagine', 0, 'Polar'],
+    'GLN': ['Glutamine', 0, 'Polar'],
+    'CYS': ['Cysteine', 0, 'Polar'],
+    'LYS': ['Lysine', 0, 'Alcaline'],
+    'ARG': ['Arginine', 0, 'Alcaline'],
+    'HIS': ['Histidine', 0, 'Alcaline'],
+    'PRO': ['Proline', 0, 'Apolar']
 }
 
 # Dicionário dos aminoácidos não proteinogênicos com nome e proporção
@@ -908,6 +969,16 @@ def toggle_laterais():
     else:
         button_laterais.config(text="Com Lig. Laterais")
 
+def toggle_hidropatica():
+    global hidropatica
+    # Alternar entre Homoquiral e Racêmico
+    hidropatica = not hidropatica
+    # Atualiza o texto do botão
+    if hidropatica:
+        button_hidropatica.config(text="Seq. Hidropáticas")
+    else:
+        button_hidropatica.config(text="Seq.  Aleatórias ")
+
 def create_scrollable_frame(parent, title, data, entries, max_height=300):
     # Frame para a seção
     section_frame = tk.Frame(parent)
@@ -942,7 +1013,8 @@ def create_scrollable_frame(parent, title, data, entries, max_height=300):
     distr_button.pack(side=tk.RIGHT)
 
     # Adiciona os dados (aminoácidos)
-    for amino_acido, (full_name, proportion) in data.items():
+    for amino_acido, values in data.items():
+        full_name, proportion = values[:2]
         # Cria um frame para agrupar o label e o entry
         frame_entry = tk.Frame(input_frame)
         frame_entry.pack(anchor="w")
@@ -985,7 +1057,7 @@ def distr_entries(entries):
 
 # Inicializa a janela principal
 root = tk.Tk()
-root.title("Simulação de Polimerização")
+root.title("Simulação de Polimerização by Lutzer")
 
 # Define a janela sempre em primeiro plano
 root.attributes('-topmost', True)
@@ -1027,6 +1099,12 @@ laterais = True  # Começa como Homoquiral
 # Botão que alterna entre Homoquiral e Racêmico
 button_laterais = tk.Button(frame_opcoes, text="Com Lig. Laterais", command=toggle_laterais)
 button_laterais.pack(side=tk.LEFT, padx=10)
+
+# Inicializa a variável ligações laterais
+hidropatica = False  # Começa como Homoquiral
+# Botão que alterna entre Homoquiral e Racêmico
+button_hidropatica = tk.Button(frame_opcoes, text="Seq. Aleatórias", command=toggle_hidropatica)
+button_hidropatica.pack(side=tk.LEFT, padx=10)
 
 # Botão para calcular
 calcular_button = tk.Button(root, text="Calcular Proporções", command=calcular_proporcoes)
